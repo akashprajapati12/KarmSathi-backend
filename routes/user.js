@@ -27,21 +27,20 @@ router.get('/dashboard', auth, async (req, res) => {
         const endOfDay = new Date();
         endOfDay.setHours(23, 59, 59, 999);
 
-        // Fetch stats
-        const totalWorkers = await Labour.countDocuments({ owner: req.user.userId });
-        const totalSites = await Site.countDocuments({ owner: req.user.userId });
-
-        const presentCount = await Attendance.countDocuments({
-            owner: req.user.userId,
-            date: { $gte: startOfDay, $lte: endOfDay },
-            status: { $in: ['Present', 'Half Day', 'Overtime'] }
-        });
-
-        const absentCount = await Attendance.countDocuments({
-            owner: req.user.userId,
-            date: { $gte: startOfDay, $lte: endOfDay },
-            status: 'Absent'
-        });
+        const [totalWorkers, totalSites, presentCount, absentCount] = await Promise.all([
+            Labour.countDocuments({ owner: req.user.userId }),
+            Site.countDocuments({ owner: req.user.userId }),
+            Attendance.countDocuments({
+                owner: req.user.userId,
+                date: { $gte: startOfDay, $lte: endOfDay },
+                status: { $in: ['Present', 'Half Day', 'Overtime'] }
+            }),
+            Attendance.countDocuments({
+                owner: req.user.userId,
+                date: { $gte: startOfDay, $lte: endOfDay },
+                status: 'Absent'
+            })
+        ]);
 
         res.json({
             message: 'Welcome to your private dashboard',

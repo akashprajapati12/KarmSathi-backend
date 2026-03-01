@@ -42,7 +42,7 @@ function checkFileType(file, cb) {
 // @access  Private
 router.get('/', auth, async (req, res) => {
     try {
-        const sites = await Site.find({ owner: req.user.userId }).sort({ createdAt: -1 });
+        const sites = await Site.find({ owner: req.user.userId }).sort({ createdAt: 1 });
         res.json(sites);
     } catch (err) {
         console.error('Fetch sites error:', err.message);

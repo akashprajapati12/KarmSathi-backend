@@ -38,4 +38,7 @@ const attendanceSchema = new mongoose.Schema({
 // Ensure a labourer can only have one attendance record per day
 attendanceSchema.index({ labour: 1, date: 1 }, { unique: true });
 
+// Optimize query for dashboard today's attendance (owner + date)
+attendanceSchema.index({ owner: 1, date: 1 });
+
 module.exports = mongoose.model('Attendance', attendanceSchema);
