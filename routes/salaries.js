@@ -126,6 +126,7 @@ router.get('/', auth, async (req, res) => {
         const salaries = await Salary.find(query)
             .populate('labour', 'name designation mobileNumber dailyRate')
             .populate('site', 'name address')
+            .populate('owner', 'name')
             .sort({ year: -1, month: -1 });
 
         res.json(salaries);
@@ -140,9 +141,10 @@ router.get('/', auth, async (req, res) => {
 // @access  Private
 router.get('/labour/:labourId', auth, async (req, res) => {
     try {
-        const salaries = await Salary.find({ labour: req.params.labourId, owner: req.user.userId })
+        const salaries = await Salary.find({ labour: req.params.labourId, owner: req.user.userId, status: 'Paid' })
             .populate('labour', 'name designation mobileNumber dailyRate')
             .populate('site', 'name address')
+            .populate('owner', 'name')
             .sort({ year: -1, month: -1 });
 
         res.json(salaries);
@@ -178,7 +180,8 @@ router.put('/:id', auth, async (req, res) => {
         // Return populated document for frontend
         salary = await Salary.findById(salary._id)
             .populate('labour', 'name designation mobileNumber dailyRate')
-            .populate('site', 'name address');
+            .populate('site', 'name address')
+            .populate('owner', 'name');
 
         res.json(salary);
     } catch (err) {
