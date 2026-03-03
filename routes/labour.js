@@ -109,11 +109,14 @@ router.put('/:id', auth, async (req, res) => {
                 return res.status(400).json({ message: 'Invalid active site selected' });
             }
 
-            // Remove from old site
-            await Site.findByIdAndUpdate(labour.site, { $pull: { assignedWorkers: labour._id } });
-            // Add to new site
-            newSiteObj.assignedWorkers.push(labour._id);
-            await newSiteObj.save();
+            // Remove from old site ONLY if it is not Completed
+            const oldSiteObj = await Site.findById(labour.site);
+            if (oldSiteObj && oldSiteObj.status !== 'Completed') {
+                await Site.findByIdAndUpdate(labour.site, { $pull: { assignedWorkers: labour._id } });
+            }
+
+            // Add to new site using $addToSet to avoid duplicates
+            await Site.findByIdAndUpdate(site, { $addToSet: { assignedWorkers: labour._id } });
         }
 
         labour.name = name || labour.name;
@@ -152,10 +155,11 @@ router.delete('/:id', auth, async (req, res) => {
             return res.status(401).json({ message: 'User not authorized' });
         }
 
-        // Remove labour from associated Site's assignedWorkers array
-        await Site.findByIdAndUpdate(labour.site, {
-            $pull: { assignedWorkers: labour._id }
-        });
+        // Remove labour from ALL associated Sites' assignedWorkers array
+        await Site.updateMany(
+            { assignedWorkers: labour._id },
+            { $pull: { assignedWorkers: labour._id } }
+        );
 
         // Clean up all related attendance records
         await Attendance.deleteMany({ labour: labour._id });

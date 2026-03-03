@@ -42,7 +42,7 @@ function checkFileType(file, cb) {
 // @access  Private
 router.get('/', auth, async (req, res) => {
     try {
-        const sites = await Site.find({ owner: req.user.userId }).sort({ createdAt: 1 });
+        const sites = await Site.find({ owner: req.user.userId, status: 'Active' }).sort({ createdAt: 1 });
         res.json(sites);
     } catch (err) {
         console.error('Fetch sites error:', err.message);
@@ -107,12 +107,15 @@ router.get('/:id', auth, async (req, res) => {
 // @access  Private
 router.get('/:id/workers', auth, async (req, res) => {
     try {
-        const site = await Site.findById(req.params.id);
+        const site = await Site.findById(req.params.id).populate({
+            path: 'assignedWorkers',
+            match: { owner: req.user.userId },
+            options: { sort: { name: 1 } }
+        });
         if (!site) return res.status(404).json({ message: 'Site not found' });
         if (site.owner.toString() !== req.user.userId) return res.status(401).json({ message: 'User not authorized' });
 
-        const workers = await Labour.find({ site: req.params.id, owner: req.user.userId }).sort({ name: 1 });
-        res.json(workers);
+        res.json(site.assignedWorkers);
     } catch (err) {
         console.error('Get site workers error:', err.message);
         res.status(500).send('Server Error');

@@ -29,7 +29,7 @@ router.get('/dashboard', auth, async (req, res) => {
 
         const [totalWorkers, totalSites, presentCount, absentCount] = await Promise.all([
             Labour.countDocuments({ owner: req.user.userId }),
-            Site.countDocuments({ owner: req.user.userId }),
+            Site.countDocuments({ owner: req.user.userId, status: 'Active' }),
             Attendance.countDocuments({
                 owner: req.user.userId,
                 date: { $gte: startOfDay, $lte: endOfDay },
