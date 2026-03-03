@@ -103,16 +103,18 @@ router.put('/:id', auth, async (req, res) => {
         }
 
         // If site is changed, we need to handle the assignedWorkers array in Site model
-        if (site && site !== labour.site.toString()) {
+        if (site && (!labour.site || site !== labour.site.toString())) {
             const newSiteObj = await Site.findById(site);
             if (!newSiteObj || newSiteObj.owner.toString() !== req.user.userId) {
                 return res.status(400).json({ message: 'Invalid active site selected' });
             }
 
             // Remove from old site ONLY if it is not Completed
-            const oldSiteObj = await Site.findById(labour.site);
-            if (oldSiteObj && oldSiteObj.status !== 'Completed') {
-                await Site.findByIdAndUpdate(labour.site, { $pull: { assignedWorkers: labour._id } });
+            if (labour.site) {
+                const oldSiteObj = await Site.findById(labour.site);
+                if (oldSiteObj && oldSiteObj.status !== 'Completed') {
+                    await Site.findByIdAndUpdate(labour.site, { $pull: { assignedWorkers: labour._id } });
+                }
             }
 
             // Add to new site using $addToSet to avoid duplicates
@@ -132,7 +134,7 @@ router.put('/:id', auth, async (req, res) => {
         const populatedLabour = await Labour.findById(labour._id).populate('site', 'name');
         res.json(populatedLabour);
     } catch (err) {
-        console.error('Update labour error:', err.message);
+        console.error('Update labour error:', err.stack || err.message);
         if (err.kind === 'ObjectId') {
             return res.status(404).json({ message: 'Worker not found' });
         }

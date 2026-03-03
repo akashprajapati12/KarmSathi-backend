@@ -42,7 +42,11 @@ function checkFileType(file, cb) {
 // @access  Private
 router.get('/', auth, async (req, res) => {
     try {
-        const sites = await Site.find({ owner: req.user.userId, status: 'Active' }).sort({ createdAt: 1 });
+        const query = { owner: req.user.userId };
+        if (req.query.all !== 'true') {
+            query.status = 'Active';
+        }
+        const sites = await Site.find(query).sort({ createdAt: 1 });
         res.json(sites);
     } catch (err) {
         console.error('Fetch sites error:', err.message);
@@ -134,6 +138,14 @@ router.put('/:id/complete', auth, async (req, res) => {
         site.status = 'Completed';
         site.endDate = Date.now();
         await site.save();
+
+        // New logic: Unassign labourers from this site when completed
+        // By setting site: null they won't show up grouped under the completed site in Labours.jsx
+        await Labour.updateMany(
+            { site: req.params.id },
+            { $unset: { site: 1 } }
+        );
+
         res.json(site);
     } catch (err) {
         console.error('Complete site error:', err.message);
