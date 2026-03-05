@@ -59,7 +59,7 @@ const SalarySchema = new mongoose.Schema({
     }
 });
 
-// Compound index to ensure a worker only has one salary record per month/year
-SalarySchema.index({ labour: 1, month: 1, year: 1 }, { unique: true });
+// Compound index to ensure a worker only has one salary record per site per month/year
+SalarySchema.index({ labour: 1, site: 1, month: 1, year: 1 }, { unique: true });
 
 module.exports = mongoose.model('Salary', SalarySchema);

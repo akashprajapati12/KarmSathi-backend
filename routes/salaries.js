@@ -31,9 +31,10 @@ router.post('/calculate', auth, async (req, res) => {
         const generatedSalaries = [];
 
         for (const worker of workers) {
-            // Find attendance records for this month
+            // Find attendance records for this month for this site
             const attendanceRecords = await Attendance.find({
                 labour: worker._id,
+                site: siteId,
                 date: { $gte: startDate, $lte: endDate }
             });
 
@@ -57,10 +58,11 @@ router.post('/calculate', auth, async (req, res) => {
             const hourlyRate = worker.dailyRate / 8;
             const overtimePay = totalOvertimeHours * hourlyRate;
 
-            // Get pending advances for this worker given BEFORE or ON the end of this month
+            // Get pending advances for this worker given BEFORE or ON the end of this month for this site
             // We use endDate to ensure we only sum advances given up to that salary month
             const pendingAdvances = await Advance.find({
                 labour: worker._id,
+                site: siteId,
                 status: 'Pending',
                 dateGiven: { $lte: endDate }
             });
@@ -73,11 +75,10 @@ router.post('/calculate', auth, async (req, res) => {
 
             const netPayable = basicSalary + overtimePay - totalAdvanceToDeduct;
 
-            // Upsert the salary record
+            // Upsert the salary record for this specific site
             const salary = await Salary.findOneAndUpdate(
-                { labour: worker._id, month, year, owner: req.user.userId },
+                { labour: worker._id, site: siteId, month, year, owner: req.user.userId },
                 {
-                    site: siteId,
                     presentDays,
                     basicSalary,
                     totalOvertimeHours,
@@ -120,8 +121,7 @@ router.get('/', auth, async (req, res) => {
         let query = { owner: req.user.userId };
 
         if (siteId) {
-            const workersAtSite = await Labour.find({ sites: siteId, owner: req.user.userId }).select('_id');
-            query.labour = { $in: workersAtSite.map(w => w._id) };
+            query.site = siteId;
         }
         if (month) query.month = parseInt(month);
         if (year) query.year = parseInt(year);
