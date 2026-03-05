@@ -11,7 +11,7 @@ const Attendance = require('../models/Attendance');
 router.get('/', auth, async (req, res) => {
     try {
         const labours = await Labour.find({ owner: req.user.userId })
-            .populate('site', 'name')
+            .populate('sites', 'name')
             .sort({ createdAt: -1 });
         res.json(labours);
     } catch (err) {
@@ -25,19 +25,26 @@ router.get('/', auth, async (req, res) => {
 // @access  Private
 router.post('/', auth, async (req, res) => {
     try {
-        const { name, mobileNumber, address, site, aadharNumber, designation, dailyRate } = req.body;
+        const { name, mobileNumber, address, sites, aadharNumber, designation, dailyRate } = req.body;
 
-        // Validate if site exists and belongs to user
-        const siteObj = await Site.findById(site);
-        if (!siteObj || siteObj.owner.toString() !== req.user.userId) {
-            return res.status(400).json({ message: 'Invalid active site selected' });
+        // If 'site' (singular) is provided for backward compatibility, convert to array
+        const siteList = Array.isArray(sites) ? sites : (req.body.site ? [req.body.site] : []);
+
+        if (siteList.length === 0) {
+            return res.status(400).json({ message: 'At least one site must be selected' });
+        }
+
+        // Validate if all sites exist and belong to user
+        const siteObjs = await Site.find({ _id: { $in: siteList }, owner: req.user.userId });
+        if (siteObjs.length !== siteList.length) {
+            return res.status(400).json({ message: 'One or more invalid sites selected' });
         }
 
         const newLabour = new Labour({
             name,
             mobileNumber,
             address,
-            site,
+            sites: siteList,
             aadharNumber,
             designation,
             dailyRate,
@@ -46,12 +53,14 @@ router.post('/', auth, async (req, res) => {
 
         const labour = await newLabour.save();
 
-        // Also push this labour into the Site's assignedWorkers array
-        siteObj.assignedWorkers.push(labour._id);
-        await siteObj.save();
+        // Also push this labour into all selected Sites' assignedWorkers array
+        await Site.updateMany(
+            { _id: { $in: siteList } },
+            { $addToSet: { assignedWorkers: labour._id } }
+        );
 
-        // Return the newly created labour populated with site name
-        const populatedLabour = await Labour.findById(labour._id).populate('site', 'name');
+        // Return the newly created labour populated with sites name
+        const populatedLabour = await Labour.findById(labour._id).populate('sites', 'name');
         res.json(populatedLabour);
 
     } catch (err) {
@@ -65,7 +74,7 @@ router.post('/', auth, async (req, res) => {
 // @access  Private
 router.get('/:id', auth, async (req, res) => {
     try {
-        const labour = await Labour.findById(req.params.id).populate('site', 'name');
+        const labour = await Labour.findById(req.params.id).populate('sites', 'name');
 
         if (!labour) {
             return res.status(404).json({ message: 'Worker not found' });
@@ -90,7 +99,7 @@ router.get('/:id', auth, async (req, res) => {
 // @access  Private
 router.put('/:id', auth, async (req, res) => {
     try {
-        const { name, mobileNumber, address, site, aadharNumber, designation, dailyRate } = req.body;
+        const { name, mobileNumber, address, sites, aadharNumber, designation, dailyRate } = req.body;
 
         let labour = await Labour.findById(req.params.id);
 
@@ -102,42 +111,112 @@ router.put('/:id', auth, async (req, res) => {
             return res.status(401).json({ message: 'User not authorized' });
         }
 
-        // If site is changed, we need to handle the assignedWorkers array in Site model
-        if (site && (!labour.site || site !== labour.site.toString())) {
-            const newSiteObj = await Site.findById(site);
-            if (!newSiteObj || newSiteObj.owner.toString() !== req.user.userId) {
-                return res.status(400).json({ message: 'Invalid active site selected' });
+        // Handle multiple sites updates
+        const newSiteList = Array.isArray(sites) ? sites : (req.body.site ? [req.body.site] : null);
+
+        if (newSiteList !== null) {
+            // Validate new sites
+            const siteObjs = await Site.find({ _id: { $in: newSiteList }, owner: req.user.userId });
+            if (siteObjs.length !== newSiteList.length) {
+                return res.status(400).json({ message: 'One or more invalid sites selected' });
             }
 
-            // Remove from old site ONLY if it is not Completed
-            if (labour.site) {
-                const oldSiteObj = await Site.findById(labour.site);
-                if (oldSiteObj && oldSiteObj.status !== 'Completed') {
-                    await Site.findByIdAndUpdate(labour.site, { $pull: { assignedWorkers: labour._id } });
-                }
+            const oldSiteList = labour.sites.map(s => s.toString());
+
+            // Sites to remove from: in old but not in new
+            const toRemove = oldSiteList.filter(s => !newSiteList.includes(s));
+            // Sites to add to: in new but not in old
+            const toAdd = newSiteList.filter(s => !oldSiteList.includes(s));
+
+            if (toRemove.length > 0) {
+                await Site.updateMany(
+                    { _id: { $in: toRemove } },
+                    { $pull: { assignedWorkers: labour._id } }
+                );
             }
 
-            // Add to new site using $addToSet to avoid duplicates
-            await Site.findByIdAndUpdate(site, { $addToSet: { assignedWorkers: labour._id } });
+            if (toAdd.length > 0) {
+                await Site.updateMany(
+                    { _id: { $in: toAdd } },
+                    { $addToSet: { assignedWorkers: labour._id } }
+                );
+            }
+
+            labour.sites = newSiteList;
         }
 
         labour.name = name || labour.name;
         labour.mobileNumber = mobileNumber || labour.mobileNumber;
         labour.address = address || labour.address;
-        labour.site = site || labour.site;
         labour.aadharNumber = aadharNumber || labour.aadharNumber;
         labour.designation = designation || labour.designation;
         labour.dailyRate = dailyRate !== undefined ? dailyRate : labour.dailyRate;
 
         await labour.save();
 
-        const populatedLabour = await Labour.findById(labour._id).populate('site', 'name');
+        const populatedLabour = await Labour.findById(labour._id).populate('sites', 'name');
         res.json(populatedLabour);
     } catch (err) {
         console.error('Update labour error:', err.stack || err.message);
         if (err.kind === 'ObjectId') {
             return res.status(404).json({ message: 'Worker not found' });
         }
+        res.status(500).send('Server Error');
+    }
+});
+
+// @route   GET /api/labours/:id/site-summary
+// @desc    Get site-wise work summary for a specific labourer
+// @access  Private
+router.get('/:id/site-summary', auth, async (req, res) => {
+    try {
+        const labourId = req.params.id;
+
+        // Verify labour belongs to user
+        const labour = await Labour.findById(labourId);
+        if (!labour || labour.owner.toString() !== req.user.userId) {
+            return res.status(404).json({ message: 'Worker not found' });
+        }
+
+        const mongoose = require('mongoose');
+
+        // Aggregate attendance records by site for 'Present', 'Half Day', or 'Overtime'
+        const summary = await Attendance.aggregate([
+            {
+                $match: {
+                    labour: new mongoose.Types.ObjectId(labourId),
+                    status: { $in: ['Present', 'Half Day', 'Overtime'] }
+                }
+            },
+            {
+                $group: {
+                    _id: '$site',
+                    presentCount: {
+                        $sum: { $cond: [{ $eq: ['$status', 'Half Day'] }, 0.5, 1] }
+                    }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'sites',
+                    localField: '_id',
+                    foreignField: '_id',
+                    as: 'siteInfo'
+                }
+            },
+            { $unwind: { path: '$siteInfo', preserveNullAndEmptyArrays: true } },
+            {
+                $project: {
+                    siteId: { $toString: '$_id' },
+                    siteName: { $ifNull: ['$siteInfo.name', 'Deleted Site'] },
+                    count: '$presentCount'
+                }
+            }
+        ]);
+
+        res.json(summary);
+    } catch (err) {
+        console.error('Fetch site summary error:', err.message);
         res.status(500).send('Server Error');
     }
 });

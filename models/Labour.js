@@ -15,11 +15,10 @@ const labourSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    site: {
+    sites: [{
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Site',
-        required: true
-    },
+        ref: 'Site'
+    }],
     aadharNumber: {
         type: String,
         required: true,

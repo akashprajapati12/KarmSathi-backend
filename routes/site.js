@@ -140,10 +140,9 @@ router.put('/:id/complete', auth, async (req, res) => {
         await site.save();
 
         // New logic: Unassign labourers from this site when completed
-        // By setting site: null they won't show up grouped under the completed site in Labours.jsx
         await Labour.updateMany(
-            { site: req.params.id },
-            { $unset: { site: 1 } }
+            { sites: req.params.id },
+            { $pull: { sites: req.params.id } }
         );
 
         res.json(site);

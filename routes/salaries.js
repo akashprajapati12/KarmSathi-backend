@@ -17,8 +17,8 @@ router.post('/calculate', auth, async (req, res) => {
             return res.status(400).json({ message: 'Site, month, and year are required' });
         }
 
-        // Get all workers assigned to this site
-        const workers = await Labour.find({ site: siteId, owner: req.user.userId });
+        // Get all workers assigned to this site (check if siteId is in their sites array)
+        const workers = await Labour.find({ sites: siteId, owner: req.user.userId });
 
         if (workers.length === 0) {
             return res.status(404).json({ message: 'No workers found at this site' });
@@ -119,7 +119,10 @@ router.get('/', auth, async (req, res) => {
         const { siteId, month, year } = req.query;
         let query = { owner: req.user.userId };
 
-        if (siteId) query.site = siteId;
+        if (siteId) {
+            const workersAtSite = await Labour.find({ sites: siteId, owner: req.user.userId }).select('_id');
+            query.labour = { $in: workersAtSite.map(w => w._id) };
+        }
         if (month) query.month = parseInt(month);
         if (year) query.year = parseInt(year);
 

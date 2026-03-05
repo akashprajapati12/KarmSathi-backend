@@ -31,10 +31,10 @@ router.get('/summary/:labourId/:year/:month', auth, async (req, res) => {
                 $gte: startDate,
                 $lte: endDate
             }
-        });
+        }).populate('site', 'name');
 
         // Format for easier frontend calendar parsing
-        // Response map format: { "YYYY-MM-DD": "Present" }
+        // Response map format: { "YYYY-MM-DD": { status, siteName } }
         const calendarMap = {};
         const stats = {
             present: 0,
@@ -47,7 +47,11 @@ router.get('/summary/:labourId/:year/:month', auth, async (req, res) => {
         attendanceRecords.forEach(record => {
             // Normalize date to YYYY-MM-DD local format safely
             const dateString = record.date.toISOString().split('T')[0];
-            calendarMap[dateString] = record.status;
+            calendarMap[dateString] = {
+                status: record.status,
+                siteName: record.site?.name || 'Unknown Site',
+                siteId: record.site?._id ? record.site._id.toString() : null
+            };
 
             if (record.status === 'Present') stats.present++;
             else if (record.status === 'Absent') stats.absent++;
@@ -113,10 +117,10 @@ router.get('/daily/:date', auth, async (req, res) => {
 // @access  Private
 router.post('/', auth, async (req, res) => {
     try {
-        const { labourId, date, status, hours } = req.body;
+        const { labourId, date, status, hours, siteId } = req.body;
 
-        if (!labourId || !date || !status) {
-            return res.status(400).json({ message: 'Missing required attendance data' });
+        if (!labourId || !date || !status || !siteId) {
+            return res.status(400).json({ message: 'Missing required attendance data (labour, date, status, siteId)' });
         }
 
         // Verify labour belongs to user
@@ -129,6 +133,23 @@ router.post('/', auth, async (req, res) => {
         const targetDate = new Date(date);
         targetDate.setUTCHours(0, 0, 0, 0);
 
+        // Enforcement: Check if attendance already exists for this worker on this date at DIFFERENT site
+        const existingRecord = await Attendance.findOne({
+            labour: labourId,
+            date: targetDate,
+            owner: req.user.userId
+        });
+
+        if (existingRecord && existingRecord.site.toString() !== siteId && status !== 'Absent') {
+            // If marking something other than 'Absent', and already exists at another site, block it.
+            // Note: We allow marking 'Absent' if they want to 'clear' it, but usually people just edit.
+            // Actually, let's keep it strictly one site as per user request.
+            return res.status(400).json({
+                message: 'Attendance already recorded at another site for this worker on this date.',
+                existingSiteId: existingRecord.site
+            });
+        }
+
         // Upsert (Update if exists, insert if new)
         const record = await Attendance.findOneAndUpdate(
             {
@@ -139,7 +160,7 @@ router.post('/', auth, async (req, res) => {
             {
                 status: status,
                 hours: hours || 0, // Save hours worked (especially for OT)
-                site: labour.site
+                site: siteId
             },
             { new: true, upsert: true }
         );
