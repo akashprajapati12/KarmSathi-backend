@@ -52,56 +52,81 @@ router.post('/calculate', auth, async (req, res) => {
                 }
             });
 
-            const basicSalary = presentDays * worker.dailyRate;
+            // Safeguard against missing dailyRate issues
+            const dailyRate = worker.dailyRate || 0;
+            const basicSalary = Number((presentDays * dailyRate).toFixed(2));
+            const hourlyRate = dailyRate / 8;
+            const overtimePay = Number((totalOvertimeHours * hourlyRate).toFixed(2));
 
-            // Assuming 8 hours is standard workday. Hourly rate = dailyRate / 8.
-            const hourlyRate = worker.dailyRate / 8;
-            const overtimePay = totalOvertimeHours * hourlyRate;
-
-            // Get pending advances for this worker given BEFORE or ON the end of this month for this site
-            // We use endDate to ensure we only sum advances given up to that salary month
-            const pendingAdvances = await Advance.find({
+            // Check if a salary record already exists for this site, month, year, worker
+            let existingSalary = await Salary.findOne({
                 labour: worker._id,
                 site: siteId,
-                status: 'Pending',
-                dateGiven: { $lte: endDate }
+                month,
+                year,
+                owner: req.user.userId
             });
 
-            // Sum the advances
-            let totalAdvanceToDeduct = 0;
-            pendingAdvances.forEach(adv => {
-                totalAdvanceToDeduct += adv.amount;
-            });
+            let totalAdvanceToDeduct = existingSalary ? existingSalary.advanceTaken : 0;
+            let pendingAdvances = [];
 
-            const netPayable = basicSalary + overtimePay - totalAdvanceToDeduct;
+            if (!existingSalary) {
+                // If it's a completely new calculation, fetch Pending advances
+                pendingAdvances = await Advance.find({
+                    labour: worker._id,
+                    site: siteId,
+                    status: 'Pending',
+                    dateGiven: { $lte: endDate }
+                });
 
-            // Upsert the salary record for this specific site
-            const salary = await Salary.findOneAndUpdate(
-                { labour: worker._id, site: siteId, month, year, owner: req.user.userId },
-                {
+                // Sum the advances
+                pendingAdvances.forEach(adv => {
+                    totalAdvanceToDeduct += adv.amount;
+                });
+            }
+
+            const netPayable = Number((basicSalary + overtimePay - totalAdvanceToDeduct).toFixed(2));
+
+            if (existingSalary) {
+                // Update existing safely
+                existingSalary.presentDays = presentDays;
+                existingSalary.basicSalary = basicSalary;
+                existingSalary.totalOvertimeHours = totalOvertimeHours;
+                existingSalary.overtimePay = overtimePay;
+                existingSalary.netPayable = netPayable;
+                // Leave advanceTaken and status alone
+
+                await existingSalary.save();
+                generatedSalaries.push(existingSalary);
+            } else {
+                // Insert fresh salary record
+                const newSalary = new Salary({
+                    labour: worker._id,
+                    site: siteId,
+                    month,
+                    year,
+                    owner: req.user.userId,
                     presentDays,
                     basicSalary,
                     totalOvertimeHours,
                     overtimePay,
+                    advanceTaken: totalAdvanceToDeduct,
                     netPayable,
-                    // If inserting fresh, set advanceTaken to the sum we just calculated
-                    // If updating an existing record, we don't overwrite manual edits to advanceTaken
-                    $setOnInsert: { advanceTaken: totalAdvanceToDeduct, status: 'Pending' }
-                },
-                { new: true, upsert: true }
-            );
+                    status: 'Pending'
+                });
 
-            // If we utilized advances for this new salary calculation, mark them as Deducted
-            if (totalAdvanceToDeduct > 0 && salary.status === 'Pending') {
-                // Technically, if they recalculate, we don't want to re-deduct.
-                // This logic safely marks them deducted once the salary is officially created.
-                await Advance.updateMany(
-                    { _id: { $in: pendingAdvances.map(a => a._id) } },
-                    { $set: { status: 'Deducted' } }
-                );
+                await newSalary.save();
+
+                // Mark advances as Deducted for newly consumed pending advances
+                if (totalAdvanceToDeduct > 0) {
+                    await Advance.updateMany(
+                        { _id: { $in: pendingAdvances.map(a => a._id) } },
+                        { $set: { status: 'Deducted' } }
+                    );
+                }
+
+                generatedSalaries.push(newSalary);
             }
-
-            generatedSalaries.push(salary);
         }
 
         res.json({ message: 'Salaries calculated successfully', count: generatedSalaries.length });
@@ -170,7 +195,7 @@ router.put('/:id', auth, async (req, res) => {
 
         if (advanceTaken !== undefined) {
             salary.advanceTaken = advanceTaken;
-            salary.netPayable = salary.basicSalary + salary.overtimePay - salary.advanceTaken;
+            salary.netPayable = Number((salary.basicSalary + salary.overtimePay - salary.advanceTaken).toFixed(2));
         }
 
         if (status) {
