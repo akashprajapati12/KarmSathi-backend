@@ -204,11 +204,12 @@ router.get('/:id/site-summary', auth, async (req, res) => {
                     as: 'siteInfo'
                 }
             },
-            { $unwind: { path: '$siteInfo', preserveNullAndEmptyArrays: true } },
+            { $unwind: '$siteInfo' },
+            { $match: { 'siteInfo.status': { $ne: 'Completed' } } },
             {
                 $project: {
                     siteId: { $toString: '$_id' },
-                    siteName: { $ifNull: ['$siteInfo.name', 'Deleted Site'] },
+                    siteName: '$siteInfo.name',
                     count: '$presentCount'
                 }
             }
