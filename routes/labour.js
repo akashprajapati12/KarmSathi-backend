@@ -4,6 +4,8 @@ const auth = require('../middleware/auth');
 const Labour = require('../models/Labour');
 const Site = require('../models/Site');
 const Attendance = require('../models/Attendance');
+const Advance = require('../models/Advance');
+const Salary = require('../models/Salary');
 
 // @route   GET /api/labours
 // @desc    Get all labours for logged-in user
@@ -16,7 +18,7 @@ router.get('/', auth, async (req, res) => {
         res.json(labours);
     } catch (err) {
         console.error('Fetch labours error:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -65,7 +67,7 @@ router.post('/', auth, async (req, res) => {
 
     } catch (err) {
         console.error('Create labour error:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -90,7 +92,7 @@ router.get('/:id', auth, async (req, res) => {
         if (err.kind === 'ObjectId') {
             return res.status(404).json({ message: 'Worker not found' });
         }
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -121,7 +123,7 @@ router.put('/:id', auth, async (req, res) => {
                 return res.status(400).json({ message: 'One or more invalid sites selected' });
             }
 
-            const oldSiteList = labour.sites.map(s => s.toString());
+            const oldSiteList = (labour.sites || []).map(s => s.toString());
 
             // Sites to remove from: in old but not in new
             const toRemove = oldSiteList.filter(s => !newSiteList.includes(s));
@@ -150,7 +152,9 @@ router.put('/:id', auth, async (req, res) => {
         labour.address = address || labour.address;
         labour.aadharNumber = aadharNumber || labour.aadharNumber;
         labour.designation = designation || labour.designation;
-        labour.dailyRate = dailyRate !== undefined ? dailyRate : labour.dailyRate;
+        if (dailyRate !== undefined && dailyRate !== null && dailyRate !== '') {
+            labour.dailyRate = Number(dailyRate);
+        }
 
         await labour.save();
 
@@ -161,7 +165,7 @@ router.put('/:id', auth, async (req, res) => {
         if (err.kind === 'ObjectId') {
             return res.status(404).json({ message: 'Worker not found' });
         }
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -178,13 +182,11 @@ router.get('/:id/site-summary', auth, async (req, res) => {
             return res.status(404).json({ message: 'Worker not found' });
         }
 
-        const mongoose = require('mongoose');
-
         // Aggregate attendance records by site for 'Present', 'Half Day', or 'Overtime'
         const summary = await Attendance.aggregate([
             {
                 $match: {
-                    labour: new mongoose.Types.ObjectId(labourId),
+                    labour: labour._id,
                     status: { $in: ['Present', 'Half Day', 'Overtime'] }
                 }
             },
@@ -218,7 +220,7 @@ router.get('/:id/site-summary', auth, async (req, res) => {
         res.json(summary);
     } catch (err) {
         console.error('Fetch site summary error:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -243,8 +245,10 @@ router.delete('/:id', auth, async (req, res) => {
             { $pull: { assignedWorkers: labour._id } }
         );
 
-        // Clean up all related attendance records
+        // Clean up all related attendance, advance, and salary records
         await Attendance.deleteMany({ labour: labour._id });
+        await Advance.deleteMany({ labour: labour._id });
+        await Salary.deleteMany({ labour: labour._id });
 
         // Ensure we use the proper delete method based on Mongoose version (deleteOne)
         await labour.deleteOne();
@@ -255,7 +259,7 @@ router.delete('/:id', auth, async (req, res) => {
         if (err.kind === 'ObjectId') {
             return res.status(404).json({ message: 'Worker not found' });
         }
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
