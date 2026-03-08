@@ -22,7 +22,13 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Database Connection
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Connected to MongoDB'))
+  .then(() => {
+      console.log('Connected to MongoDB');
+      // Proactively drop legacy salaries index if it exists in the remote deployment
+      mongoose.connection.db.collection('salaries').dropIndex('labour_1_month_1_year_1')
+        .then(() => console.log('Dropped obsolete salary index (labour_1_month_1_year_1)'))
+        .catch(() => {}); // Ignore if already dropped or doesn't exist
+  })
   .catch((err) => console.error('MongoDB connection error:', err));
 
 // Routes
