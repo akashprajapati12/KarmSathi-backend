@@ -85,7 +85,8 @@ router.post('/calculate', auth, async (req, res) => {
                 });
             }
 
-            const netPayable = Number((basicSalary + overtimePay - totalAdvanceToDeduct).toFixed(2));
+            let netPayable = Number((basicSalary + overtimePay - totalAdvanceToDeduct).toFixed(2));
+            if (netPayable < 0) netPayable = 0;
 
             if (existingSalary) {
                 // Update existing safely
@@ -151,6 +152,8 @@ router.get('/', auth, async (req, res) => {
         if (month) query.month = parseInt(month);
         if (year) query.year = parseInt(year);
 
+        query.isArchivedFromGlobal = { $ne: true };
+
         const salaries = await Salary.find(query)
             .populate('labour', 'name designation mobileNumber dailyRate')
             .populate('site', 'name address')
@@ -196,6 +199,7 @@ router.put('/:id', auth, async (req, res) => {
         if (advanceTaken !== undefined) {
             salary.advanceTaken = advanceTaken;
             salary.netPayable = Number((salary.basicSalary + salary.overtimePay - salary.advanceTaken).toFixed(2));
+            if (salary.netPayable < 0) salary.netPayable = 0;
         }
 
         if (status) {
@@ -223,10 +227,17 @@ router.put('/:id', auth, async (req, res) => {
 // @access  Private
 router.delete('/:id', auth, async (req, res) => {
     try {
+        const { global } = req.query;
         const salary = await Salary.findById(req.params.id);
 
         if (!salary) return res.status(404).json({ message: 'Salary record not found' });
         if (salary.owner.toString() !== req.user.userId) return res.status(401).json({ message: 'Not authorized' });
+
+        if (global === 'true' && salary.status === 'Paid') {
+            salary.isArchivedFromGlobal = true;
+            await salary.save();
+            return res.json({ message: 'Salary record hidden from global view' });
+        }
 
         await salary.deleteOne();
         res.json({ message: 'Salary record removed' });
