@@ -53,10 +53,10 @@ router.post('/calculate', auth, async (req, res) => {
             });
 
             // Safeguard against missing dailyRate issues
-            const dailyRate = worker.dailyRate || 0;
-            const basicSalary = Number((presentDays * dailyRate).toFixed(2));
+            const dailyRate = Number(worker.dailyRate) || 0;
+            const basicSalary = Number((presentDays * dailyRate).toFixed(2)) || 0;
             const hourlyRate = dailyRate / 8;
-            const overtimePay = Number((totalOvertimeHours * hourlyRate).toFixed(2));
+            const overtimePay = Number((totalOvertimeHours * hourlyRate).toFixed(2)) || 0;
 
             // Check if a salary record already exists for this site, month, year, worker
             let existingSalary = await Salary.findOne({
@@ -67,7 +67,7 @@ router.post('/calculate', auth, async (req, res) => {
                 owner: req.user.userId
             });
 
-            let totalAdvanceToDeduct = existingSalary ? existingSalary.advanceTaken : 0;
+            let totalAdvanceToDeduct = existingSalary ? Number(existingSalary.advanceTaken || 0) : 0;
             let pendingAdvances = [];
 
             if (!existingSalary) {
@@ -81,12 +81,12 @@ router.post('/calculate', auth, async (req, res) => {
 
                 // Sum the advances
                 pendingAdvances.forEach(adv => {
-                    totalAdvanceToDeduct += adv.amount;
+                    totalAdvanceToDeduct += Number(adv.amount || 0);
                 });
             }
 
-            let netPayable = Number((basicSalary + overtimePay - totalAdvanceToDeduct).toFixed(2));
-            if (netPayable < 0) netPayable = 0;
+            let netPayable = Number((basicSalary + overtimePay - totalAdvanceToDeduct).toFixed(2)) || 0;
+            if (netPayable < 0 || isNaN(netPayable)) netPayable = 0;
 
             if (existingSalary) {
                 // Update existing safely
@@ -134,7 +134,7 @@ router.post('/calculate', auth, async (req, res) => {
 
     } catch (err) {
         console.error('Calculate salaries error:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -163,7 +163,7 @@ router.get('/', auth, async (req, res) => {
         res.json(salaries);
     } catch (err) {
         console.error('Fetch salaries error:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -181,7 +181,7 @@ router.get('/labour/:labourId', auth, async (req, res) => {
         res.json(salaries);
     } catch (err) {
         console.error('Fetch salary history error:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -218,7 +218,7 @@ router.put('/:id', auth, async (req, res) => {
         res.json(salary);
     } catch (err) {
         console.error('Update salary error:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
@@ -243,7 +243,7 @@ router.delete('/:id', auth, async (req, res) => {
         res.json({ message: 'Salary record removed' });
     } catch (err) {
         console.error('Delete salary error:', err.message);
-        res.status(500).send('Server Error');
+        res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
 
