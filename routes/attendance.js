@@ -172,4 +172,27 @@ router.post('/', auth, async (req, res) => {
     }
 });
 
+// @route   DELETE /api/attendance/:labourId/:date
+// @desc    Delete or reset attendance for a labourer for a specific day
+// @access  Private
+router.delete('/:labourId/:date', auth, async (req, res) => {
+    try {
+        const { labourId, date } = req.params;
+
+        const targetDate = new Date(date);
+        targetDate.setUTCHours(0, 0, 0, 0);
+
+        await Attendance.findOneAndDelete({
+            labour: labourId,
+            date: targetDate,
+            owner: req.user.userId
+        });
+
+        res.json({ message: 'Attendance reset successfully' });
+    } catch (err) {
+        console.error('Reset attendance error:', err.message);
+        res.status(500).send('Server Error');
+    }
+});
+
 module.exports = router;
