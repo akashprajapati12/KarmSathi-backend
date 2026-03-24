@@ -38,6 +38,14 @@ const userSchema = new mongoose.Schema({
         ref: 'User',
         default: null
     },
+    resetPasswordCode: {
+        type: String,
+        default: null
+    },
+    resetPasswordExpires: {
+        type: Date,
+        default: null
+    },
     createdAt: {
         type: Date,
         default: Date.now

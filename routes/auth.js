@@ -3,6 +3,16 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Site = require('../models/Site');
 const auth = require('../middleware/auth');
+const nodemailer = require('nodemailer');
+
+const transporter = nodemailer.createTransport({
+    service: 'gmail', // Configurable email service
+    auth: {
+        user: process.env.EMAIL_USER || '',
+        pass: process.env.EMAIL_PASS || ''
+    }
+});
+
 const router = express.Router();
 
 // Helper: sign JWT with full role context
@@ -236,6 +246,96 @@ router.delete('/managers/:id', auth, async (req, res) => {
     } catch (error) {
         console.error('Delete manager error:', error);
         res.status(500).json({ message: 'Server error' });
+    }
+});
+
+// @route   POST /api/auth/forgot-password
+// @desc    Initiate password reset, send verification code to email
+// @access  Public
+router.post('/forgot-password', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ message: 'Email is required' });
+        }
+
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        let targetEmail = user.email;
+
+        // If manager, send to owner's email
+        if (user.role === 'Manager') {
+            if (!user.ownerId) {
+                return res.status(400).json({ message: 'Manager has no owner assigned' });
+            }
+            const owner = await User.findById(user.ownerId);
+            if (!owner) {
+                return res.status(404).json({ message: 'Owner not found' });
+            }
+            targetEmail = owner.email;
+        }
+
+        // Generate a 6-digit verification code
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+
+        user.resetPasswordCode = code;
+        user.resetPasswordExpires = Date.now() + 3600000; // 1 hour expiration
+        await user.save();
+
+        if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+            const mailOptions = {
+                from: process.env.EMAIL_USER,
+                to: targetEmail,
+                subject: 'Password Reset Verification Code - KarmSaathi',
+                text: `You have requested to reset your password. Here is your verification code: ${code}\n\nThis code will expire in 1 hour.`
+            };
+
+            await transporter.sendMail(mailOptions);
+            res.json({ message: 'Verification code sent to email' });
+        } else {
+            console.log(`Email Service Not Configured. Verification code for ${user.email} (sent to ${targetEmail}) is ${code}`);
+            res.json({ message: 'Verification code generated (check server console as EMAIL_USER is not set)' });
+        }
+
+    } catch (error) {
+        console.error('Forgot password error:', error);
+        res.status(500).json({ message: 'Server error: ' + error.message });
+    }
+});
+
+// @route   POST /api/auth/reset-password
+// @desc    Reset password using verification code
+// @access  Public
+router.post('/reset-password', async (req, res) => {
+    try {
+        const { email, code, newPassword } = req.body;
+        if (!email || !code || !newPassword) {
+            return res.status(400).json({ message: 'Email, code, and new password are required' });
+        }
+
+        const user = await User.findOne({ email });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (user.resetPasswordCode !== code || !user.resetPasswordExpires || user.resetPasswordExpires < Date.now()) {
+            return res.status(400).json({ message: 'Invalid or expired verification code' });
+        }
+
+        user.password = newPassword;
+        user.resetPasswordCode = null;
+        user.resetPasswordExpires = null;
+        
+        await user.save();
+
+        res.json({ message: 'Password has been successfully reset' });
+
+    } catch (error) {
+        console.error('Reset password error:', error);
+        res.status(500).json({ message: 'Server error: ' + error.message });
     }
 });
 
