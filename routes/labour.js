@@ -7,12 +7,26 @@ const Attendance = require('../models/Attendance');
 const Advance = require('../models/Advance');
 const Salary = require('../models/Salary');
 
+// Helper: get the site IDs a Manager is assigned to
+const getManagerSiteIds = async (managerId, ownerId) => {
+    const sites = await Site.find({ owner: ownerId, assignedManagers: managerId }).select('_id');
+    return sites.map(s => s._id);
+};
+
 // @route   GET /api/labours
-// @desc    Get all labours for logged-in user
+// @desc    Get all labours — Managers only see workers at their sites
 // @access  Private
 router.get('/', auth, async (req, res) => {
     try {
-        const labours = await Labour.find({ owner: req.user.userId })
+        const ownerId = req.user.effectiveOwnerId;
+        let query = { owner: ownerId };
+
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = await getManagerSiteIds(req.user.userId, ownerId);
+            query.sites = { $in: assignedSiteIds };
+        }
+
+        const labours = await Labour.find(query)
             .populate('sites', 'name')
             .sort({ createdAt: -1 });
         res.json(labours);
@@ -23,48 +37,51 @@ router.get('/', auth, async (req, res) => {
 });
 
 // @route   POST /api/labours
-// @desc    Add a new labour
+// @desc    Add a new labour — Managers can only add to their assigned sites
 // @access  Private
 router.post('/', auth, async (req, res) => {
     try {
+        const ownerId = req.user.effectiveOwnerId;
         const { name, mobileNumber, address, sites, aadharNumber, designation, dailyRate } = req.body;
 
-        // If 'site' (singular) is provided for backward compatibility, convert to array
         const siteList = Array.isArray(sites) ? sites : (req.body.site ? [req.body.site] : []);
 
         if (siteList.length === 0) {
             return res.status(400).json({ message: 'At least one site must be selected' });
         }
 
-        // Validate if all sites exist and belong to user
-        const siteObjs = await Site.find({ _id: { $in: siteList }, owner: req.user.userId });
+        // Validate sites belong to effective owner
+        const siteObjs = await Site.find({ _id: { $in: siteList }, owner: ownerId });
         if (siteObjs.length !== siteList.length) {
             return res.status(400).json({ message: 'One or more invalid sites selected' });
         }
 
+        // Managers: ensure they are only adding to their assigned sites
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = await getManagerSiteIds(req.user.userId, ownerId);
+            const assignedStrings = assignedSiteIds.map(id => id.toString());
+            const unauthorized = siteList.filter(s => !assignedStrings.includes(s));
+            if (unauthorized.length > 0) {
+                return res.status(403).json({ message: 'You can only add workers to your assigned sites' });
+            }
+        }
+
         const newLabour = new Labour({
-            name,
-            mobileNumber,
-            address,
+            name, mobileNumber, address,
             sites: siteList,
-            aadharNumber,
-            designation,
-            dailyRate,
-            owner: req.user.userId
+            aadharNumber, designation, dailyRate,
+            owner: ownerId   // Always stored under the Owner's ID
         });
 
         const labour = await newLabour.save();
 
-        // Also push this labour into all selected Sites' assignedWorkers array
         await Site.updateMany(
             { _id: { $in: siteList } },
             { $addToSet: { assignedWorkers: labour._id } }
         );
 
-        // Return the newly created labour populated with sites name
         const populatedLabour = await Labour.findById(labour._id).populate('sites', 'name');
         res.json(populatedLabour);
-
     } catch (err) {
         console.error('Create labour error:', err.message);
         res.status(500).json({ message: err.message || 'Server Error' });
@@ -76,22 +93,25 @@ router.post('/', auth, async (req, res) => {
 // @access  Private
 router.get('/:id', auth, async (req, res) => {
     try {
-        const labour = await Labour.findById(req.params.id).populate('sites', 'name');
+        const ownerId = req.user.effectiveOwnerId;
+        const labour = await Labour.findOne({ _id: req.params.id, owner: ownerId }).populate('sites', 'name');
 
         if (!labour) {
             return res.status(404).json({ message: 'Worker not found' });
         }
 
-        if (labour.owner.toString() !== req.user.userId) {
-            return res.status(401).json({ message: 'User not authorized' });
+        // Managers: verify worker belongs to their site
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = (await getManagerSiteIds(req.user.userId, ownerId)).map(id => id.toString());
+            const workerSiteIds = labour.sites.map(s => s._id.toString());
+            const hasAccess = workerSiteIds.some(s => assignedSiteIds.includes(s));
+            if (!hasAccess) return res.status(403).json({ message: 'Access denied to this worker' });
         }
 
         res.json(labour);
     } catch (err) {
         console.error('Get labour error:', err.message);
-        if (err.kind === 'ObjectId') {
-            return res.status(404).json({ message: 'Worker not found' });
-        }
+        if (err.kind === 'ObjectId') return res.status(404).json({ message: 'Worker not found' });
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
@@ -101,47 +121,38 @@ router.get('/:id', auth, async (req, res) => {
 // @access  Private
 router.put('/:id', auth, async (req, res) => {
     try {
+        const ownerId = req.user.effectiveOwnerId;
         const { name, mobileNumber, address, sites, aadharNumber, designation, dailyRate } = req.body;
 
-        let labour = await Labour.findById(req.params.id);
+        let labour = await Labour.findOne({ _id: req.params.id, owner: ownerId });
+        if (!labour) return res.status(404).json({ message: 'Worker not found' });
 
-        if (!labour) {
-            return res.status(404).json({ message: 'Worker not found' });
-        }
-
-        if (labour.owner.toString() !== req.user.userId) {
-            return res.status(401).json({ message: 'User not authorized' });
-        }
-
-        // Handle multiple sites updates
         const newSiteList = Array.isArray(sites) ? sites : (req.body.site ? [req.body.site] : null);
 
         if (newSiteList !== null) {
-            // Validate new sites
-            const siteObjs = await Site.find({ _id: { $in: newSiteList }, owner: req.user.userId });
+            const siteObjs = await Site.find({ _id: { $in: newSiteList }, owner: ownerId });
             if (siteObjs.length !== newSiteList.length) {
                 return res.status(400).json({ message: 'One or more invalid sites selected' });
             }
 
-            const oldSiteList = (labour.sites || []).map(s => s.toString());
+            // Managers: can only assign within their sites
+            if (req.user.role === 'Manager') {
+                const assignedSiteIds = (await getManagerSiteIds(req.user.userId, ownerId)).map(id => id.toString());
+                const unauthorized = newSiteList.filter(s => !assignedSiteIds.includes(s));
+                if (unauthorized.length > 0) {
+                    return res.status(403).json({ message: 'You can only assign workers to your sites' });
+                }
+            }
 
-            // Sites to remove from: in old but not in new
+            const oldSiteList = (labour.sites || []).map(s => s.toString());
             const toRemove = oldSiteList.filter(s => !newSiteList.includes(s));
-            // Sites to add to: in new but not in old
             const toAdd = newSiteList.filter(s => !oldSiteList.includes(s));
 
             if (toRemove.length > 0) {
-                await Site.updateMany(
-                    { _id: { $in: toRemove } },
-                    { $pull: { assignedWorkers: labour._id } }
-                );
+                await Site.updateMany({ _id: { $in: toRemove } }, { $pull: { assignedWorkers: labour._id } });
             }
-
             if (toAdd.length > 0) {
-                await Site.updateMany(
-                    { _id: { $in: toAdd } },
-                    { $addToSet: { assignedWorkers: labour._id } }
-                );
+                await Site.updateMany({ _id: { $in: toAdd } }, { $addToSet: { assignedWorkers: labour._id } });
             }
 
             labour.sites = newSiteList;
@@ -157,14 +168,11 @@ router.put('/:id', auth, async (req, res) => {
         }
 
         await labour.save();
-
         const populatedLabour = await Labour.findById(labour._id).populate('sites', 'name');
         res.json(populatedLabour);
     } catch (err) {
         console.error('Update labour error:', err.stack || err.message);
-        if (err.kind === 'ObjectId') {
-            return res.status(404).json({ message: 'Worker not found' });
-        }
+        if (err.kind === 'ObjectId') return res.status(404).json({ message: 'Worker not found' });
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });
@@ -174,47 +182,17 @@ router.put('/:id', auth, async (req, res) => {
 // @access  Private
 router.get('/:id/site-summary', auth, async (req, res) => {
     try {
-        const labourId = req.params.id;
+        const ownerId = req.user.effectiveOwnerId;
+        const labour = await Labour.findOne({ _id: req.params.id, owner: ownerId });
+        if (!labour) return res.status(404).json({ message: 'Worker not found' });
 
-        // Verify labour belongs to user
-        const labour = await Labour.findById(labourId);
-        if (!labour || labour.owner.toString() !== req.user.userId) {
-            return res.status(404).json({ message: 'Worker not found' });
-        }
-
-        // Aggregate attendance records by site for 'Present', 'Half Day', or 'Overtime'
         const summary = await Attendance.aggregate([
-            {
-                $match: {
-                    labour: labour._id,
-                    status: { $in: ['Present', 'Half Day', 'Overtime'] }
-                }
-            },
-            {
-                $group: {
-                    _id: '$site',
-                    presentCount: {
-                        $sum: { $cond: [{ $eq: ['$status', 'Half Day'] }, 0.5, 1] }
-                    }
-                }
-            },
-            {
-                $lookup: {
-                    from: 'sites',
-                    localField: '_id',
-                    foreignField: '_id',
-                    as: 'siteInfo'
-                }
-            },
+            { $match: { labour: labour._id, status: { $in: ['Present', 'Half Day', 'Overtime'] } } },
+            { $group: { _id: '$site', presentCount: { $sum: { $cond: [{ $eq: ['$status', 'Half Day'] }, 0.5, 1] } } } },
+            { $lookup: { from: 'sites', localField: '_id', foreignField: '_id', as: 'siteInfo' } },
             { $unwind: '$siteInfo' },
             { $match: { 'siteInfo.status': { $ne: 'Completed' } } },
-            {
-                $project: {
-                    siteId: { $toString: '$_id' },
-                    siteName: '$siteInfo.name',
-                    count: '$presentCount'
-                }
-            }
+            { $project: { siteId: { $toString: '$_id' }, siteName: '$siteInfo.name', count: '$presentCount' } }
         ]);
 
         res.json(summary);
@@ -225,40 +203,27 @@ router.get('/:id/site-summary', auth, async (req, res) => {
 });
 
 // @route   DELETE /api/labours/:id
-// @desc    Delete a labourer
+// @desc    Delete a labourer (Owner only)
 // @access  Private
 router.delete('/:id', auth, async (req, res) => {
     try {
-        const labour = await Labour.findById(req.params.id);
-
-        if (!labour) {
-            return res.status(404).json({ message: 'Worker not found' });
+        if (req.user.role === 'Manager') {
+            return res.status(403).json({ message: 'Managers cannot delete workers' });
         }
 
-        if (labour.owner.toString() !== req.user.userId) {
-            return res.status(401).json({ message: 'User not authorized' });
-        }
+        const labour = await Labour.findOne({ _id: req.params.id, owner: req.user.userId });
+        if (!labour) return res.status(404).json({ message: 'Worker not found' });
 
-        // Remove labour from ALL associated Sites' assignedWorkers array
-        await Site.updateMany(
-            { assignedWorkers: labour._id },
-            { $pull: { assignedWorkers: labour._id } }
-        );
-
-        // Clean up all related attendance, advance, and salary records
+        await Site.updateMany({ assignedWorkers: labour._id }, { $pull: { assignedWorkers: labour._id } });
         await Attendance.deleteMany({ labour: labour._id });
         await Advance.deleteMany({ labour: labour._id });
         await Salary.deleteMany({ labour: labour._id });
-
-        // Ensure we use the proper delete method based on Mongoose version (deleteOne)
         await labour.deleteOne();
 
         res.json({ message: 'Worker deleted successfully' });
     } catch (err) {
         console.error('Delete labour error:', err.message);
-        if (err.kind === 'ObjectId') {
-            return res.status(404).json({ message: 'Worker not found' });
-        }
+        if (err.kind === 'ObjectId') return res.status(404).json({ message: 'Worker not found' });
         res.status(500).json({ message: err.message || 'Server Error' });
     }
 });

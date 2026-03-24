@@ -5,33 +5,44 @@ const Salary = require('../models/Salary');
 const Labour = require('../models/Labour');
 const Attendance = require('../models/Attendance');
 const Advance = require('../models/Advance');
+const Site = require('../models/Site');
+
+// Helper: get the site IDs a Manager is assigned to
+const getManagerSiteIds = async (managerId, ownerId) => {
+    const sites = await Site.find({ owner: ownerId, assignedManagers: managerId }).select('_id');
+    return sites.map(s => s._id);
+};
 
 // @route   POST /api/salaries/calculate
 // @desc    Calculate and generate salaries for all workers at a specific site for a given month/year
 // @access  Private
 router.post('/calculate', auth, async (req, res) => {
     try {
+        const ownerId = req.user.effectiveOwnerId;
         const { siteId, month, year } = req.body;
 
         if (!siteId || !month || !year) {
             return res.status(400).json({ message: 'Site, month, and year are required' });
         }
 
-        // Get all workers assigned to this site (check if siteId is in their sites array)
-        const workers = await Labour.find({ sites: siteId, owner: req.user.userId });
+        // Managers: verify they are allowed to calculate for this site
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = (await getManagerSiteIds(req.user.userId, ownerId)).map(id => id.toString());
+            if (!assignedSiteIds.includes(siteId)) {
+                return res.status(403).json({ message: 'You can only calculate salaries for your assigned sites' });
+            }
+        }
 
+        const workers = await Labour.find({ sites: siteId, owner: ownerId });
         if (workers.length === 0) {
             return res.status(404).json({ message: 'No workers found at this site' });
         }
 
-        // Define date boundaries for the month
         const startDate = new Date(year, month - 1, 1);
         const endDate = new Date(year, month, 0, 23, 59, 59);
-
         const generatedSalaries = [];
 
         for (const worker of workers) {
-            // Find attendance records for this month for this site
             const attendanceRecords = await Attendance.find({
                 labour: worker._id,
                 site: siteId,
@@ -45,41 +56,34 @@ router.post('/calculate', auth, async (req, res) => {
                 if (record.status === 'Present') presentDays += 1;
                 else if (record.status === 'Half Day') presentDays += 0.5;
                 else if (record.status === 'Overtime') {
-                    presentDays += 1; // Overtime inherently means they were present
-                    if (record.hours > 8) {
-                        totalOvertimeHours += (record.hours - 8);
-                    }
+                    presentDays += 1;
+                    if (record.hours > 8) totalOvertimeHours += (record.hours - 8);
                 }
             });
 
-            // Safeguard against missing dailyRate issues
             const dailyRate = Number(worker.dailyRate) || 0;
             const basicSalary = Number((presentDays * dailyRate).toFixed(2)) || 0;
             const hourlyRate = dailyRate / 8;
             const overtimePay = Number((totalOvertimeHours * hourlyRate).toFixed(2)) || 0;
 
-            // Check if a salary record already exists for this site, month, year, worker
             let existingSalary = await Salary.findOne({
                 labour: worker._id,
                 site: siteId,
                 month,
                 year,
-                owner: req.user.userId
+                owner: ownerId
             });
 
             let totalAdvanceToDeduct = existingSalary ? Number(existingSalary.advanceTaken || 0) : 0;
             let pendingAdvances = [];
 
             if (!existingSalary) {
-                // If it's a completely new calculation, fetch Pending advances
                 pendingAdvances = await Advance.find({
                     labour: worker._id,
                     site: siteId,
                     status: 'Pending',
                     dateGiven: { $lte: endDate }
                 });
-
-                // Sum the advances
                 pendingAdvances.forEach(adv => {
                     totalAdvanceToDeduct += Number(adv.amount || 0);
                 });
@@ -89,24 +93,20 @@ router.post('/calculate', auth, async (req, res) => {
             if (netPayable < 0 || isNaN(netPayable)) netPayable = 0;
 
             if (existingSalary) {
-                // Update existing safely
                 existingSalary.presentDays = presentDays;
                 existingSalary.basicSalary = basicSalary;
                 existingSalary.totalOvertimeHours = totalOvertimeHours;
                 existingSalary.overtimePay = overtimePay;
                 existingSalary.netPayable = netPayable;
-                // Leave advanceTaken and status alone
-
                 await existingSalary.save();
                 generatedSalaries.push(existingSalary);
             } else {
-                // Insert fresh salary record
                 const newSalary = new Salary({
                     labour: worker._id,
                     site: siteId,
                     month,
                     year,
-                    owner: req.user.userId,
+                    owner: ownerId,   // Always under Owner's ID
                     presentDays,
                     basicSalary,
                     totalOvertimeHours,
@@ -118,7 +118,6 @@ router.post('/calculate', auth, async (req, res) => {
 
                 await newSalary.save();
 
-                // Mark advances as Deducted for newly consumed pending advances
                 if (totalAdvanceToDeduct > 0) {
                     await Advance.updateMany(
                         { _id: { $in: pendingAdvances.map(a => a._id) } },
@@ -131,7 +130,6 @@ router.post('/calculate', auth, async (req, res) => {
         }
 
         res.json({ message: 'Salaries calculated successfully', count: generatedSalaries.length });
-
     } catch (err) {
         console.error('Calculate salaries error:', err.message);
         res.status(500).json({ message: err.message || 'Server Error' });
@@ -139,20 +137,31 @@ router.post('/calculate', auth, async (req, res) => {
 });
 
 // @route   GET /api/salaries
-// @desc    Get all calculated salaries, optionally filtered by site, month, year
+// @desc    Get all calculated salaries — Managers see only their site's salaries
 // @access  Private
 router.get('/', auth, async (req, res) => {
     try {
+        const ownerId = req.user.effectiveOwnerId;
         const { siteId, month, year } = req.query;
-        let query = { owner: req.user.userId };
+        let query = { owner: ownerId };
 
-        if (siteId) {
-            query.site = siteId;
-        }
+        if (siteId) query.site = siteId;
         if (month) query.month = parseInt(month);
         if (year) query.year = parseInt(year);
 
         query.isArchivedFromGlobal = { $ne: true };
+
+        // Managers: scope to their assigned sites
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = await getManagerSiteIds(req.user.userId, ownerId);
+            // If a specific siteId is requested, verify it's in their list
+            if (siteId) {
+                const allowed = assignedSiteIds.map(id => id.toString()).includes(siteId);
+                if (!allowed) return res.status(403).json({ message: 'Access denied to this site' });
+            } else {
+                query.site = { $in: assignedSiteIds };
+            }
+        }
 
         const salaries = await Salary.find(query)
             .populate('labour', 'name designation mobileNumber dailyRate')
@@ -172,7 +181,9 @@ router.get('/', auth, async (req, res) => {
 // @access  Private
 router.get('/labour/:labourId', auth, async (req, res) => {
     try {
-        const salaries = await Salary.find({ labour: req.params.labourId, owner: req.user.userId, status: 'Paid' })
+        const ownerId = req.user.effectiveOwnerId;
+
+        const salaries = await Salary.find({ labour: req.params.labourId, owner: ownerId, status: 'Paid' })
             .populate('labour', 'name designation mobileNumber dailyRate')
             .populate('site', 'name address')
             .populate('owner', 'name')
@@ -186,15 +197,23 @@ router.get('/labour/:labourId', auth, async (req, res) => {
 });
 
 // @route   PUT /api/salaries/:id
-// @desc    Update a salary record (e.g. tracking Advance taken or Status)
+// @desc    Update a salary record (advance taken or status)
 // @access  Private
 router.put('/:id', auth, async (req, res) => {
     try {
+        const ownerId = req.user.effectiveOwnerId;
         const { advanceTaken, status } = req.body;
 
-        let salary = await Salary.findById(req.params.id);
+        let salary = await Salary.findOne({ _id: req.params.id, owner: ownerId });
         if (!salary) return res.status(404).json({ message: 'Salary record not found' });
-        if (salary.owner.toString() !== req.user.userId) return res.status(401).json({ message: 'Not authorized' });
+
+        // Managers: verify site access
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = (await getManagerSiteIds(req.user.userId, ownerId)).map(id => id.toString());
+            if (!assignedSiteIds.includes(salary.site.toString())) {
+                return res.status(403).json({ message: 'Access denied' });
+            }
+        }
 
         if (advanceTaken !== undefined) {
             salary.advanceTaken = advanceTaken;
@@ -209,7 +228,6 @@ router.put('/:id', auth, async (req, res) => {
 
         await salary.save();
 
-        // Return populated document for frontend
         salary = await Salary.findById(salary._id)
             .populate('labour', 'name designation mobileNumber dailyRate')
             .populate('site', 'name address')
@@ -223,16 +241,18 @@ router.put('/:id', auth, async (req, res) => {
 });
 
 // @route   DELETE /api/salaries/:id
-// @desc    Delete a salary record
+// @desc    Delete a salary record (Owner only)
 // @access  Private
 router.delete('/:id', auth, async (req, res) => {
     try {
-        const { global } = req.query;
-        const salary = await Salary.findById(req.params.id);
+        if (req.user.role === 'Manager') {
+            return res.status(403).json({ message: 'Managers cannot delete salary records' });
+        }
 
+        const salary = await Salary.findOne({ _id: req.params.id, owner: req.user.userId });
         if (!salary) return res.status(404).json({ message: 'Salary record not found' });
-        if (salary.owner.toString() !== req.user.userId) return res.status(401).json({ message: 'Not authorized' });
 
+        const { global } = req.query;
         if (global === 'true' && salary.status === 'Paid') {
             salary.isArchivedFromGlobal = true;
             await salary.save();

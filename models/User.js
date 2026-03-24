@@ -26,6 +26,18 @@ const userSchema = new mongoose.Schema({
         required: true,
         minlength: 6
     },
+    // 'Owner' = full access | 'Manager' = site-scoped access
+    role: {
+        type: String,
+        enum: ['Owner', 'Manager'],
+        default: 'Owner'
+    },
+    // For Managers only: the ObjectId of the Owner who created them
+    ownerId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
     createdAt: {
         type: Date,
         default: Date.now

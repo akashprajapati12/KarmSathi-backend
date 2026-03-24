@@ -21,6 +21,11 @@ const siteSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Labour'
     }],
+    // Managers assigned to manage this site by the Owner
+    assignedManagers: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User'
+    }],
     startDate: {
         type: Date,
         required: true,

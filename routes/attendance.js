@@ -4,7 +4,14 @@ const auth = require('../middleware/auth');
 const Attendance = require('../models/Attendance');
 const Labour = require('../models/Labour');
 const Leave = require('../models/Leave');
+const Site = require('../models/Site');
 const mongoose = require('mongoose');
+
+// Helper: get the site IDs a Manager is assigned to
+const getManagerSiteIds = async (managerId, ownerId) => {
+    const sites = await Site.find({ owner: ownerId, assignedManagers: managerId }).select('_id');
+    return sites.map(s => s._id);
+};
 
 // @route   GET /api/attendance/summary/:labourId/:year/:month
 // @desc    Get monthly calendar attendance summary for a specific labourer
@@ -12,40 +19,24 @@ const mongoose = require('mongoose');
 router.get('/summary/:labourId/:year/:month', auth, async (req, res) => {
     try {
         const { labourId, year, month } = req.params;
+        const ownerId = req.user.effectiveOwnerId;
 
-        // Verify labour belongs to user
-        const labour = await Labour.findById(labourId);
-        if (!labour || labour.owner.toString() !== req.user.userId) {
-            return res.status(404).json({ message: 'Worker not found' });
-        }
+        const labour = await Labour.findOne({ _id: labourId, owner: ownerId });
+        if (!labour) return res.status(404).json({ message: 'Worker not found' });
 
-        // Construct start and end dates for the month
-        // Note: Month from client is 1-indexed (1=Jan, 12=Dec)
         const startDate = new Date(year, month - 1, 1);
-        const endDate = new Date(year, month, 0, 23, 59, 59); // Last day of month
+        const endDate = new Date(year, month, 0, 23, 59, 59);
 
         const attendanceRecords = await Attendance.find({
             labour: labourId,
-            owner: req.user.userId,
-            date: {
-                $gte: startDate,
-                $lte: endDate
-            }
+            owner: ownerId,
+            date: { $gte: startDate, $lte: endDate }
         }).populate('site', 'name');
 
-        // Format for easier frontend calendar parsing
-        // Response map format: { "YYYY-MM-DD": { status, siteName } }
         const calendarMap = {};
-        const stats = {
-            present: 0,
-            absent: 0,
-            halfDay: 0,
-            overtime: 0,
-            overtimeHours: 0
-        };
+        const stats = { present: 0, absent: 0, halfDay: 0, overtime: 0, overtimeHours: 0 };
 
         attendanceRecords.forEach(record => {
-            // Normalize date to YYYY-MM-DD local format safely
             const dateString = record.date.toISOString().split('T')[0];
             calendarMap[dateString] = {
                 status: record.status,
@@ -58,17 +49,11 @@ router.get('/summary/:labourId/:year/:month', auth, async (req, res) => {
             else if (record.status === 'Half Day') stats.halfDay++;
             else if (record.status === 'Overtime') {
                 stats.overtime++;
-                if (record.hours > 8) {
-                    stats.overtimeHours += (record.hours - 8); // Extra OT hours
-                }
+                if (record.hours > 8) stats.overtimeHours += (record.hours - 8);
             }
         });
 
-        res.json({
-            records: calendarMap,
-            stats: stats
-        });
-
+        res.json({ records: calendarMap, stats });
     } catch (err) {
         console.error('Fetch attendance error:', err.message);
         res.status(500).send('Server Error');
@@ -80,32 +65,33 @@ router.get('/summary/:labourId/:year/:month', auth, async (req, res) => {
 // @access  Private
 router.get('/daily/:date', auth, async (req, res) => {
     try {
+        const ownerId = req.user.effectiveOwnerId;
         const { date } = req.params;
 
-        // Normalize date
         const targetDate = new Date(date);
         targetDate.setUTCHours(0, 0, 0, 0);
 
-        // Fetch all records for this user on this day
-        const records = await Attendance.find({
-            owner: req.user.userId,
-            date: targetDate
-        }).populate('labour', 'name designation dailyRate'); // Populate labour details
+        let query = { owner: ownerId, date: targetDate };
 
-        // Fetch any Approved leaves that cover this date
-        const activeLeaves = await Leave.find({
-            owner: req.user.userId,
-            status: 'Approved',
-            startDate: { $lte: targetDate },
-            endDate: { $gte: targetDate }
-        });
+        // Managers: only see records for their assigned sites
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = await getManagerSiteIds(req.user.userId, ownerId);
+            query.site = { $in: assignedSiteIds };
+        }
 
+        const records = await Attendance.find(query)
+            .populate('labour', 'name designation dailyRate');
+
+        const leaveQuery = { owner: ownerId, status: 'Approved', startDate: { $lte: targetDate }, endDate: { $gte: targetDate } };
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = await getManagerSiteIds(req.user.userId, ownerId);
+            leaveQuery.site = { $in: assignedSiteIds };
+        }
+
+        const activeLeaves = await Leave.find(leaveQuery);
         const excludedWorkerIds = activeLeaves.map(leave => leave.labour.toString());
 
-        res.json({
-            records,
-            excludedWorkerIds
-        });
+        res.json({ records, excludedWorkerIds });
     } catch (err) {
         console.error('Fetch daily attendance error:', err.message);
         res.status(500).send('Server Error');
@@ -113,55 +99,44 @@ router.get('/daily/:date', auth, async (req, res) => {
 });
 
 // @route   POST /api/attendance
-// @desc    Mark attendance for a labourer for a specific day
+// @desc    Mark attendance for a labourer
 // @access  Private
 router.post('/', auth, async (req, res) => {
     try {
+        const ownerId = req.user.effectiveOwnerId;
         const { labourId, date, status, hours, siteId } = req.body;
 
         if (!labourId || !date || !status || !siteId) {
             return res.status(400).json({ message: 'Missing required attendance data (labour, date, status, siteId)' });
         }
 
-        // Verify labour belongs to user
-        const labour = await Labour.findById(labourId);
-        if (!labour || labour.owner.toString() !== req.user.userId) {
-            return res.status(404).json({ message: 'Worker not found' });
+        // Verify labour belongs to effective owner
+        const labour = await Labour.findOne({ _id: labourId, owner: ownerId });
+        if (!labour) return res.status(404).json({ message: 'Worker not found' });
+
+        // Managers: verify the site is one of their assigned sites
+        if (req.user.role === 'Manager') {
+            const assignedSiteIds = (await getManagerSiteIds(req.user.userId, ownerId)).map(id => id.toString());
+            if (!assignedSiteIds.includes(siteId)) {
+                return res.status(403).json({ message: 'You can only mark attendance for your assigned sites' });
+            }
         }
 
-        // Strip time from date to normalize it
         const targetDate = new Date(date);
         targetDate.setUTCHours(0, 0, 0, 0);
 
-        // Enforcement: Check if attendance already exists for this worker on this date at DIFFERENT site
-        const existingRecord = await Attendance.findOne({
-            labour: labourId,
-            date: targetDate,
-            owner: req.user.userId
-        });
+        const existingRecord = await Attendance.findOne({ labour: labourId, date: targetDate, owner: ownerId });
 
         if (existingRecord && existingRecord.site.toString() !== siteId && status !== 'Absent') {
-            // If marking something other than 'Absent', and already exists at another site, block it.
-            // Note: We allow marking 'Absent' if they want to 'clear' it, but usually people just edit.
-            // Actually, let's keep it strictly one site as per user request.
             return res.status(400).json({
                 message: 'Attendance already recorded at another site for this worker on this date.',
                 existingSiteId: existingRecord.site
             });
         }
 
-        // Upsert (Update if exists, insert if new)
         const record = await Attendance.findOneAndUpdate(
-            {
-                labour: labourId,
-                date: targetDate,
-                owner: req.user.userId
-            },
-            {
-                status: status,
-                hours: hours || 0, // Save hours worked (especially for OT)
-                site: siteId
-            },
+            { labour: labourId, date: targetDate, owner: ownerId },
+            { status, hours: hours || 0, site: siteId },
             { new: true, upsert: true }
         );
 
@@ -173,21 +148,17 @@ router.post('/', auth, async (req, res) => {
 });
 
 // @route   DELETE /api/attendance/:labourId/:date
-// @desc    Delete or reset attendance for a labourer for a specific day
+// @desc    Delete/reset attendance for a labourer for a specific day
 // @access  Private
 router.delete('/:labourId/:date', auth, async (req, res) => {
     try {
+        const ownerId = req.user.effectiveOwnerId;
         const { labourId, date } = req.params;
 
         const targetDate = new Date(date);
         targetDate.setUTCHours(0, 0, 0, 0);
 
-        await Attendance.findOneAndDelete({
-            labour: labourId,
-            date: targetDate,
-            owner: req.user.userId
-        });
-
+        await Attendance.findOneAndDelete({ labour: labourId, date: targetDate, owner: ownerId });
         res.json({ message: 'Attendance reset successfully' });
     } catch (err) {
         console.error('Reset attendance error:', err.message);
